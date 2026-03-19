@@ -15,7 +15,6 @@ import (
 )
 
 // --- Mock SignalConn ---
-
 type mockSignalConn struct {
 	mu       sync.Mutex
 	messages []*livekit.ServerMessage
@@ -75,7 +74,6 @@ func (m *mockSignalConn) isClosed() bool {
 }
 
 // --- Dispatch recorder for DispatchWorkerSignal tests ---
-
 type dispatchRecorder struct {
 	UnimplementedWorkerSignalHandler
 	lastCall string
@@ -117,7 +115,6 @@ func (h *dispatchRecorder) HandleMigrateJob(*livekit.MigrateJobRequest) error {
 }
 
 // --- Test helpers ---
-
 func newTestWorker(conn SignalConn) *Worker {
 	reg := MakeWorkerRegistration()
 	reg.AgentName = "test-agent"
@@ -178,7 +175,6 @@ func respondToAvailability(conn *mockSignalConn, w *Worker, available bool, term
 }
 
 // ========== Tests ==========
-
 func TestJobStatusIsEnded(t *testing.T) {
 	require.True(t, JobStatusIsEnded(livekit.JobStatus_JS_SUCCESS))
 	require.True(t, JobStatusIsEnded(livekit.JobStatus_JS_FAILED))
@@ -244,6 +240,11 @@ func TestDispatchWorkerSignal(t *testing.T) {
 		err := DispatchWorkerSignal(&livekit.WorkerMessage{}, h)
 		require.ErrorIs(t, err, ErrUnknownWorkerSignal)
 	})
+
+	t.Run("nil input returns error", func(t *testing.T) {
+		err := DispatchWorkerSignal(nil, h)
+		require.ErrorIs(t, err, ErrNilInput)
+	})
 }
 
 func TestUnimplementedWorkerSignalHandler(t *testing.T) {
@@ -258,19 +259,28 @@ func TestUnimplementedWorkerSignalHandler(t *testing.T) {
 }
 
 func TestWorkerPingHandler(t *testing.T) {
-	conn := newMockSignalConn()
-	h := WorkerPingHandler{conn: conn}
+	t.Run("responds with pong", func(t *testing.T) {
+		conn := newMockSignalConn()
+		h := WorkerPingHandler{conn: conn}
 
-	now := time.Now().UnixMilli()
-	err := h.HandlePing(&livekit.WorkerPing{Timestamp: now})
-	require.NoError(t, err)
+		now := time.Now().UnixMilli()
+		err := h.HandlePing(&livekit.WorkerPing{Timestamp: now})
+		require.NoError(t, err)
 
-	msgs := conn.getMessages()
-	require.Len(t, msgs, 1)
-	pong, ok := msgs[0].Message.(*livekit.ServerMessage_Pong)
-	require.True(t, ok)
-	require.Equal(t, now, pong.Pong.LastTimestamp)
-	require.GreaterOrEqual(t, pong.Pong.Timestamp, now)
+		msgs := conn.getMessages()
+		require.Len(t, msgs, 1)
+		pong, ok := msgs[0].Message.(*livekit.ServerMessage_Pong)
+		require.True(t, ok)
+		require.Equal(t, now, pong.Pong.LastTimestamp)
+		require.GreaterOrEqual(t, pong.Pong.Timestamp, now)
+	})
+
+	t.Run("nil input returns error", func(t *testing.T) {
+		conn := newMockSignalConn()
+		h := WorkerPingHandler{conn: conn}
+		err := h.HandlePing(nil)
+		require.ErrorIs(t, err, ErrNilInput)
+	})
 }
 
 func TestMakeWorkerRegistration(t *testing.T) {
@@ -365,6 +375,13 @@ func TestWorkerRegisterer(t *testing.T) {
 		d := reg.Deadline()
 		require.True(t, d.After(before))
 		require.True(t, d.Before(before.Add(RegisterTimeout+time.Second)))
+	})
+
+	t.Run("nil input returns error", func(t *testing.T) {
+		conn := newMockSignalConn()
+		reg := NewWorkerRegisterer(conn, nil, MakeWorkerRegistration())
+		err := reg.HandleRegister(nil)
+		require.ErrorIs(t, err, ErrNilInput)
 	})
 }
 
@@ -826,6 +843,15 @@ func TestWorkerUpdateJobStatus(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, state2.Error)
 	})
+
+	t.Run("nil input returns error", func(t *testing.T) {
+		conn := newMockSignalConn()
+		w := newTestWorker(conn)
+		t.Cleanup(func() { w.Close() })
+
+		_, err := w.UpdateJobStatus(nil)
+		require.ErrorIs(t, err, ErrNilInput)
+	})
 }
 
 func TestWorkerHandleAvailability(t *testing.T) {
@@ -872,6 +898,15 @@ func TestWorkerHandleAvailability(t *testing.T) {
 		})
 		require.NoError(t, err)
 	})
+
+	t.Run("nil input returns error", func(t *testing.T) {
+		conn := newMockSignalConn()
+		w := newTestWorker(conn)
+		t.Cleanup(func() { w.Close() })
+
+		err := w.HandleAvailability(nil)
+		require.ErrorIs(t, err, ErrNilInput)
+	})
 }
 
 func TestWorkerHandleUpdateJob(t *testing.T) {
@@ -902,6 +937,15 @@ func TestWorkerHandleUpdateJob(t *testing.T) {
 			Status: livekit.JobStatus_JS_SUCCESS,
 		})
 		require.NoError(t, err)
+	})
+
+	t.Run("nil input returns error", func(t *testing.T) {
+		conn := newMockSignalConn()
+		w := newTestWorker(conn)
+		t.Cleanup(func() { w.Close() })
+
+		err := w.HandleUpdateJob(nil)
+		require.ErrorIs(t, err, ErrNilInput)
 	})
 }
 
@@ -939,6 +983,11 @@ func TestWorkerHandleUpdateWorker(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, livekit.WorkerStatus_WS_FULL, w.Status())
 		require.Equal(t, float32(1.0), w.Load())
+	})
+
+	t.Run("nil input returns error", func(t *testing.T) {
+		err := w.HandleUpdateWorker(nil)
+		require.ErrorIs(t, err, ErrNilInput)
 	})
 }
 
@@ -1025,6 +1074,15 @@ func TestWorkerHandleSimulateJob(t *testing.T) {
 			return false
 		}, time.Second, 10*time.Millisecond)
 	})
+
+	t.Run("nil input returns error", func(t *testing.T) {
+		conn := newMockSignalConn()
+		w := newTestWorker(conn)
+		t.Cleanup(func() { w.Close() })
+
+		err := w.HandleSimulateJob(nil)
+		require.ErrorIs(t, err, ErrNilInput)
+	})
 }
 
 func TestWorkerConcurrentAccess(t *testing.T) {
@@ -1061,4 +1119,24 @@ func TestWorkerConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestWorkerHandleMigrateJob(t *testing.T) {
+	t.Run("returns nil for valid input", func(t *testing.T) {
+		conn := newMockSignalConn()
+		w := newTestWorker(conn)
+		t.Cleanup(func() { w.Close() })
+
+		err := w.HandleMigrateJob(&livekit.MigrateJobRequest{})
+		require.NoError(t, err)
+	})
+
+	t.Run("nil input returns error", func(t *testing.T) {
+		conn := newMockSignalConn()
+		w := newTestWorker(conn)
+		t.Cleanup(func() { w.Close() })
+
+		err := w.HandleMigrateJob(nil)
+		require.ErrorIs(t, err, ErrNilInput)
+	})
 }

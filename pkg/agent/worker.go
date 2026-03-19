@@ -41,10 +41,12 @@ var (
 	ErrWorkerNotAvailable         = errors.New("worker not available")
 	ErrAvailabilityTimeout        = errors.New("agent worker availability timeout")
 	ErrDuplicateJobAssignment     = errors.New("duplicate job assignment")
+	ErrNilInput                   = errors.New("nil input")
 )
 
 const AgentNameAttributeKey = "lk.agent_name"
 
+// WorkerProtocolVersion represents the protocol version for agent worker communication.
 type WorkerProtocolVersion int
 
 const CurrentProtocol = 1
@@ -54,6 +56,7 @@ const (
 	AssignJobTimeout = 10 * time.Second
 )
 
+// SignalConn represents a WebSocket connection for sending and receiving agent worker signals.
 type SignalConn interface {
 	WriteServerMessage(msg *livekit.ServerMessage) (int, error)
 	ReadWorkerMessage() (*livekit.WorkerMessage, int, error)
@@ -61,10 +64,12 @@ type SignalConn interface {
 	Close() error
 }
 
+// JobStatusIsEnded reports whether the given job status indicates the job has ended.
 func JobStatusIsEnded(s livekit.JobStatus) bool {
 	return s == livekit.JobStatus_JS_SUCCESS || s == livekit.JobStatus_JS_FAILED
 }
 
+// WorkerSignalHandler defines the interface for handling incoming worker signal messages.
 type WorkerSignalHandler interface {
 	HandleRegister(*livekit.RegisterWorkerRequest) error
 	HandleAvailability(*livekit.AvailabilityResponse) error
@@ -75,7 +80,12 @@ type WorkerSignalHandler interface {
 	HandleMigrateJob(*livekit.MigrateJobRequest) error
 }
 
+// DispatchWorkerSignal routes an incoming WorkerMessage to the appropriate handler method.
 func DispatchWorkerSignal(req *livekit.WorkerMessage, h WorkerSignalHandler) error {
+	if req == nil {
+		return ErrNilInput
+	}
+
 	switch m := req.Message.(type) {
 	case *livekit.WorkerMessage_Register:
 		return h.HandleRegister(m.Register)
@@ -98,6 +108,7 @@ func DispatchWorkerSignal(req *livekit.WorkerMessage, h WorkerSignalHandler) err
 
 var _ WorkerSignalHandler = (*UnimplementedWorkerSignalHandler)(nil)
 
+// UnimplementedWorkerSignalHandler provides default implementations that return ErrUnimplementedWrorkerSignal.
 type UnimplementedWorkerSignalHandler struct{}
 
 func (UnimplementedWorkerSignalHandler) HandleRegister(*livekit.RegisterWorkerRequest) error {
@@ -122,12 +133,18 @@ func (UnimplementedWorkerSignalHandler) HandleMigrateJob(*livekit.MigrateJobRequ
 	return fmt.Errorf("%w: MigrateJob", ErrUnimplementedWrorkerSignal)
 }
 
+// WorkerPingHandler responds to worker ping messages with pong responses.
 type WorkerPingHandler struct {
 	UnimplementedWorkerSignalHandler
 	conn SignalConn
 }
 
+// HandlePing responds to a worker ping with a pong containing the current timestamp.
 func (h WorkerPingHandler) HandlePing(ping *livekit.WorkerPing) error {
+	if ping == nil {
+		return ErrNilInput
+	}
+
 	_, err := h.conn.WriteServerMessage(&livekit.ServerMessage{
 		Message: &livekit.ServerMessage_Pong{
 			Pong: &livekit.WorkerPong{
@@ -139,6 +156,7 @@ func (h WorkerPingHandler) HandlePing(ping *livekit.WorkerPing) error {
 	return err
 }
 
+// WorkerRegistration holds the metadata associated with a registered agent worker.
 type WorkerRegistration struct {
 	Protocol    WorkerProtocolVersion
 	ID          string
@@ -151,6 +169,7 @@ type WorkerRegistration struct {
 	ClientIP    string
 }
 
+// MakeWorkerRegistration creates a new WorkerRegistration with a generated ID and current protocol version.
 func MakeWorkerRegistration() WorkerRegistration {
 	return WorkerRegistration{
 		ID:       guid.New(guid.AgentWorkerPrefix),
@@ -160,6 +179,7 @@ func MakeWorkerRegistration() WorkerRegistration {
 
 var _ WorkerSignalHandler = (*WorkerRegisterer)(nil)
 
+// WorkerRegisterer handles the initial registration handshake for a new agent worker connection.
 type WorkerRegisterer struct {
 	WorkerPingHandler
 	serverInfo *livekit.ServerInfo
@@ -169,6 +189,7 @@ type WorkerRegisterer struct {
 	registered   bool
 }
 
+// NewWorkerRegisterer creates a WorkerRegisterer for the given connection and server info.
 func NewWorkerRegisterer(conn SignalConn, serverInfo *livekit.ServerInfo, base WorkerRegistration) *WorkerRegisterer {
 	return &WorkerRegisterer{
 		WorkerPingHandler: WorkerPingHandler{conn: conn},
@@ -178,19 +199,27 @@ func NewWorkerRegisterer(conn SignalConn, serverInfo *livekit.ServerInfo, base W
 	}
 }
 
+// Deadline returns the time by which the worker must complete registration.
 func (h *WorkerRegisterer) Deadline() time.Time {
 	return h.deadline
 }
 
+// Registration returns the current WorkerRegistration metadata.
 func (h *WorkerRegisterer) Registration() WorkerRegistration {
 	return h.registration
 }
 
+// Registered reports whether the worker has successfully completed registration.
 func (h *WorkerRegisterer) Registered() bool {
 	return h.registered
 }
 
+// HandleRegister processes a worker registration request and sends back a registration response.
 func (h *WorkerRegisterer) HandleRegister(req *livekit.RegisterWorkerRequest) error {
+	if req == nil {
+		return ErrNilInput
+	}
+
 	if !livekit.IsJobType(req.GetType()) {
 		return ErrUnknownJobType
 	}
@@ -225,6 +254,7 @@ func (h *WorkerRegisterer) HandleRegister(req *livekit.RegisterWorkerRequest) er
 
 var _ WorkerSignalHandler = (*Worker)(nil)
 
+// Worker represents an active agent worker that can be assigned jobs and communicates via a signal connection.
 type Worker struct {
 	WorkerPingHandler
 	WorkerRegistration
@@ -245,6 +275,7 @@ type Worker struct {
 	availability map[livekit.JobID]chan *livekit.AvailabilityResponse
 }
 
+// NewWorker creates a Worker with the given registration, credentials, and signal connection.
 func NewWorker(
 	registration WorkerRegistration,
 	apiKey string,
@@ -280,22 +311,26 @@ func (w *Worker) sendRequest(req *livekit.ServerMessage) {
 	}
 }
 
+// Status returns the current worker status.
 func (w *Worker) Status() livekit.WorkerStatus {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.status
 }
 
+// Load returns the current load factor reported by the worker.
 func (w *Worker) Load() float32 {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.load
 }
 
+// Logger returns the logger instance associated with this worker.
 func (w *Worker) Logger() logger.Logger {
 	return w.logger
 }
 
+// RunningJobs returns a shallow copy of the currently running jobs map.
 func (w *Worker) RunningJobs() map[livekit.JobID]*livekit.Job {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -306,13 +341,20 @@ func (w *Worker) RunningJobs() map[livekit.JobID]*livekit.Job {
 	return jobs
 }
 
+// RunningJobCount returns the number of currently running jobs.
 func (w *Worker) RunningJobCount() int {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return len(w.runningJobs)
 }
 
+// GetJobState returns the cloned job state for the given job ID.
 func (w *Worker) GetJobState(jobID livekit.JobID) (*livekit.JobState, error) {
+
+	if jobID == "" {
+		return nil, ErrNilInput
+	}
+
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	j, ok := w.runningJobs[jobID]
@@ -322,7 +364,13 @@ func (w *Worker) GetJobState(jobID livekit.JobID) (*livekit.JobState, error) {
 	return utils.CloneProto(j.State), nil
 }
 
+// AssignJob assigns a job to the worker and waits for an availability response.
 func (w *Worker) AssignJob(ctx context.Context, job *livekit.Job) (*livekit.JobState, error) {
+
+	if job == nil {
+		return nil, ErrNilInput
+	}
+
 	availCh := make(chan *livekit.AvailabilityResponse, 1)
 	job = utils.CloneProto(job)
 	jobID := livekit.JobID(job.Id)
@@ -417,7 +465,13 @@ func (w *Worker) AssignJob(ctx context.Context, job *livekit.Job) (*livekit.JobS
 	}
 }
 
+// TerminateJob sends a termination signal to the worker for the specified job and updates its status.
 func (w *Worker) TerminateJob(jobID livekit.JobID, reason rpc.JobTerminateReason) (*livekit.JobState, error) {
+
+	if jobID == "" {
+		return nil, ErrNilInput
+	}
+
 	w.mu.RLock()
 	_, ok := w.runningJobs[jobID]
 	w.mu.RUnlock()
@@ -446,10 +500,12 @@ func (w *Worker) TerminateJob(jobID livekit.JobID, reason rpc.JobTerminateReason
 	})
 }
 
+// UpdateMetadata logs a worker metadata update.
 func (w *Worker) UpdateMetadata(metadata string) {
 	w.logger.Debugw("worker metadata updated", nil, "metadata", metadata)
 }
 
+// IsClosed reports whether the worker has been closed.
 func (w *Worker) IsClosed() bool {
 	select {
 	case <-w.closed:
@@ -459,6 +515,7 @@ func (w *Worker) IsClosed() bool {
 	}
 }
 
+// Close shuts down the worker, cancels its context, and closes the signal connection.
 func (w *Worker) Close() {
 	w.mu.Lock()
 	if w.IsClosed() {
@@ -474,7 +531,12 @@ func (w *Worker) Close() {
 	w.mu.Unlock()
 }
 
+// HandleAvailability processes an availability response from the worker for a pending job assignment.
 func (w *Worker) HandleAvailability(res *livekit.AvailabilityResponse) error {
+	if res == nil {
+		return ErrNilInput
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -491,7 +553,12 @@ func (w *Worker) HandleAvailability(res *livekit.AvailabilityResponse) error {
 	return nil
 }
 
+// HandleUpdateJob processes a job status update from the worker.
 func (w *Worker) HandleUpdateJob(update *livekit.UpdateJobStatus) error {
+	if update == nil {
+		return ErrNilInput
+	}
+
 	_, err := w.UpdateJobStatus(update)
 	if err != nil {
 		// treating this as a debug message only
@@ -503,7 +570,12 @@ func (w *Worker) HandleUpdateJob(update *livekit.UpdateJobStatus) error {
 	return nil
 }
 
+// UpdateJobStatus applies a job status update and returns the resulting job state.
 func (w *Worker) UpdateJobStatus(update *livekit.UpdateJobStatus) (*livekit.JobState, error) {
+	if update == nil {
+		return nil, ErrNilInput
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -533,7 +605,12 @@ func (w *Worker) UpdateJobStatus(update *livekit.UpdateJobStatus) (*livekit.JobS
 	return proto.Clone(job.State).(*livekit.JobState), nil
 }
 
+// HandleSimulateJob creates and assigns a simulated job to the worker for testing purposes.
 func (w *Worker) HandleSimulateJob(simulate *livekit.SimulateJobRequest) error {
+	if simulate == nil {
+		return ErrNilInput
+	}
+
 	jobType := livekit.JobType_JT_ROOM
 	if simulate.Participant != nil {
 		jobType = livekit.JobType_JT_PUBLISHER
@@ -558,7 +635,12 @@ func (w *Worker) HandleSimulateJob(simulate *livekit.SimulateJobRequest) error {
 	return nil
 }
 
+// HandleUpdateWorker updates the worker's status and load from a worker status message.
 func (w *Worker) HandleUpdateWorker(update *livekit.UpdateWorkerStatus) error {
+	if update == nil {
+		return ErrNilInput
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -571,7 +653,12 @@ func (w *Worker) HandleUpdateWorker(update *livekit.UpdateWorkerStatus) error {
 	return nil
 }
 
+// HandleMigrateJob handles a job migration request. Not yet implemented in OSS.
 func (w *Worker) HandleMigrateJob(req *livekit.MigrateJobRequest) error {
+	if req == nil {
+		return ErrNilInput
+	}
+
 	// TODO(theomonnom): On OSS this is not implemented
 	// We could maybe just move a specific job to another worker
 	return nil
